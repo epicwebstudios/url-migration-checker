@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import csv
 import asyncio
 from dataclasses import dataclass
@@ -14,6 +15,19 @@ console = Console()
 MAX_CONCURRENT = 20
 TIMEOUT = 15
 
+NOT_FOUND_PATTERNS = [
+    "page not found",
+    "404 not found",
+    "not found",
+    "error 404",
+    "the page you requested",
+    "page doesn't exist",
+    "page does not exist",
+    "no longer available",
+]
+
+TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
 
 @dataclass
 class CheckResult:
@@ -22,6 +36,7 @@ class CheckResult:
     status_code: int | None
     status_text: str
     exists: bool
+    page_title: str
 
 
 def load_urls_from_csv(path: str, column: str = "Address") -> list[str]:
@@ -45,6 +60,20 @@ def remap_url(old_url: str, new_domain: str, force_https: bool = True) -> str:
     return urlunparse(parsed._replace(scheme=scheme, netloc=new_domain))
 
 
+def _extract_title(html: str) -> str:
+    match = TITLE_RE.search(html)
+    return match.group(1).strip() if match else ""
+
+
+def _looks_like_not_found(title: str) -> bool:
+    lower = title.lower()
+    return any(pattern in lower for pattern in NOT_FOUND_PATTERNS)
+
+
+def _is_html(content_type: str) -> bool:
+    return "text/html" in content_type
+
+
 async def check_single(
     client: httpx.AsyncClient,
     old_url: str,
@@ -54,20 +83,35 @@ async def check_single(
     new_url = remap_url(old_url, new_domain)
     async with semaphore:
         try:
-            resp = await client.head(new_url, follow_redirects=True)
-            if resp.status_code == 405:
-                resp = await client.get(new_url, follow_redirects=True)
-            return CheckResult(
-                old_url=old_url,
-                new_url=new_url,
-                status_code=resp.status_code,
-                status_text=httpx.codes.get_reason_phrase(resp.status_code),
-                exists=resp.status_code < 400,
-            )
+            resp = await client.get(new_url, follow_redirects=True)
+            code = resp.status_code
+            content_type = resp.headers.get("content-type", "")
+            title = ""
+            is_soft_404 = False
+
+            if _is_html(content_type):
+                title = _extract_title(resp.text)
+                is_soft_404 = _looks_like_not_found(title)
+
+            # A page "exists" if it returns < 400, OR returns a page that
+            # isn't a not-found page (handles servers that 404 everything).
+            if code < 400:
+                exists = not is_soft_404
+            elif _is_html(content_type) and title and not is_soft_404:
+                exists = True
+            else:
+                exists = False
+
+            status_text = httpx.codes.get_reason_phrase(code)
+            if is_soft_404:
+                status_text = "Soft 404 (page says not found)"
+
+            return CheckResult(old_url, new_url, code, status_text, exists, title)
+
         except httpx.TimeoutException:
-            return CheckResult(old_url, new_url, None, "Timeout", False)
+            return CheckResult(old_url, new_url, None, "Timeout", False, "")
         except Exception as e:
-            return CheckResult(old_url, new_url, None, str(e)[:120], False)
+            return CheckResult(old_url, new_url, None, str(e)[:120], False, "")
 
 
 async def check_all(
@@ -90,7 +134,6 @@ async def check_all(
             console=console,
         ) as progress:
             task = progress.add_task("Checking URLs", total=len(urls))
-            results: list[CheckResult] = []
 
             async def wrapped(url: str) -> CheckResult:
                 result = await check_single(client, url, new_domain, semaphore)
@@ -104,7 +147,7 @@ async def check_all(
 def write_results(results: list[CheckResult], output_path: str) -> None:
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["Old URL", "New URL", "Status Code", "Status", "Exists"])
+        writer.writerow(["Old URL", "New URL", "Status Code", "Status", "Exists", "Page Title"])
         for r in results:
             writer.writerow([
                 r.old_url,
@@ -112,4 +155,5 @@ def write_results(results: list[CheckResult], output_path: str) -> None:
                 r.status_code or "Error",
                 r.status_text,
                 "Yes" if r.exists else "No",
+                r.page_title,
             ])
