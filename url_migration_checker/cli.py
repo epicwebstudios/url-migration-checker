@@ -52,12 +52,16 @@ def main() -> None:
     found = sum(1 for r in results if r.exists)
     missing = len(results) - found
 
+    soft_404 = sum(1 for r in results if "Soft 404" in r.status_text)
+
     table = Table(title="Results Summary")
     table.add_column("Metric", style="bold")
     table.add_column("Count", justify="right")
     table.add_row("Total URLs", str(len(results)))
-    table.add_row("Exist (2xx/3xx)", f"[green]{found}[/green]")
-    table.add_row("Missing (4xx/5xx/err)", f"[red]{missing}[/red]")
+    table.add_row("Exist", f"[green]{found}[/green]")
+    table.add_row("Missing", f"[red]{missing}[/red]")
+    if soft_404:
+        table.add_row("Soft 404s (in missing)", f"[yellow]{soft_404}[/yellow]")
     console.print(table)
 
     console.print(f"\n[bold green]Results saved to:[/bold green] {args.output}\n")
