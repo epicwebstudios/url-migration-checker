@@ -1,0 +1,17 @@
+[project]
+name = "url-migration-checker"
+version = "1.0.0"
+description = "Check if URLs from an old site exist on a new domain before migration cutover"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.28.1",
+    "rich>=14.3.3",
+]
+
+[project.scripts]
+url-check = "url_migration_checker.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
